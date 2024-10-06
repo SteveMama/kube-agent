@@ -12,7 +12,7 @@ logging.basicConfig(level=logging.DEBUG,
 
 app = Flask(__name__)
 
-#openapi_key = 0# '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'
+#openapi_key = 0# '42Cx_URr5M_1eaFkDWu4SmmvqVungkQ-k-OkxlGke81VUKvEm6WlZGtjKmljMLBO0nkA'
 
 
 # Define the Pydantic response model
