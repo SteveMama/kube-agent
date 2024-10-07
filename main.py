@@ -93,7 +93,7 @@ def get_all_cluster_info():
         return {"error": str(e)}
 
 
-def get_langchain_response(cluster_details, query):
+def get_agent_response(cluster_details, query):
     """
     Function to generate a response using LangChain and OpenAI.
     """
@@ -148,7 +148,7 @@ def create_query():
         logging.info(f"Received query: {query}")
 
         cluster_details = get_all_cluster_info()
-        answer = get_langchain_response(cluster_details, query)
+        answer = get_agent_response(cluster_details, query)
 
         logging.info(f"Generated answer: {answer}")
 
