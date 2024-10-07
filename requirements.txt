@@ -1,0 +1,4 @@
+requests
+Flask
+pydantic
+langchain==0.2.12
