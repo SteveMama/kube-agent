@@ -120,8 +120,11 @@ def get_agent_response(cluster_details, query):
 
     prompt_template = """
     You are a Kubernetes expert. Below are the details of the nodes, namespaces, and pods in a Kubernetes cluster.
-    Use the information provided to answer the query accurately. Remember to return only the answer without any unique identifiers.
-    Thi
+    Use the information provided to answer the query accurately. Remember to return only the answer without any unique identifiers. you must return the answer without any explainations as well.
+    Follow the format provided in the sample question and answers while returning the answer. 
+    Q: "Which pod is spawned by my-deployment?" A: "my-pod"
+    Q: "What is the status of the pod named 'example-pod'?" A: "Running"
+    Q: "How many nodes are there in the cluster?" A: "2"
 
     Node Status:
     {node_info}
@@ -156,6 +159,7 @@ def create_query():
         logging.info(f"Received query: {query}")
 
         cluster_details = get_all_cluster_info()
+
         answer = get_agent_response(cluster_details, query)
 
         logging.info(f"Generated answer: {answer}")
