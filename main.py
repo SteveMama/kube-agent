@@ -36,7 +36,8 @@ def get_all_cluster_info():
             nodes = clientv1.list_node()
             for node in nodes.items:
                 node_name = node.metadata.name
-                node_details[node_name] = {"namespaces": {}, "status": node.status.conditions}
+                node_status = {condition.type: condition.status for condition in node.status.conditions}
+                node_details[node_name] = {"namespaces": {}, "node_status": node_status}
         except client.exceptions.ApiException as e:
             if e.status == 403:
                 logging.warning(f"Permission denied when accessing nodes. Error: {e}")
@@ -97,25 +98,33 @@ def get_agent_response(cluster_details, query):
     """
     Function to generate a response using LangChain and OpenAI.
     """
-    print(f"Cluster Details Structure: {cluster_details}")
-
     try:
+        node_info = "\n".join([
+            f"Node: {node}\nStatus: {', '.join([f'{k}: {v}' for k, v in node_data['node_status'].items()])}"
+            for node, node_data in cluster_details.items()
+            if isinstance(node_data, dict) and "node_status" in node_data
+        ])
+
         namespace_info = "\n".join([
-            f"Namespace: {namespace}\nPods: {', '.join([pod['pod_name'].split('-')[0] for pod in details['pods']])}\nStatus: {', '.join([pod['status'] for pod in details['pods']])}"
+            f"Namespace: {namespace}\nPods: {', '.join([pod['pod_name'].split('-')[0] for pod in details])}\nStatus: {', '.join([pod['status'] for pod in details])}"
             for node, namespaces in cluster_details.items()
             if isinstance(namespaces, dict) and "namespaces" in namespaces
             for namespace, details in namespaces["namespaces"].items()
-            if isinstance(details, dict) and "pods" in details
+            if isinstance(details, list)
         ])
-    except KeyError as e:
-        print(f"KeyError encountered in processing: {e}")
-        namespace_info = "Invalid cluster structure."
 
-    print(f"Formatted Namespace Info: {namespace_info}")
+    except KeyError as e:
+        logging.error(f"KeyError encountered in processing: {e}")
+        namespace_info = "Invalid cluster structure."
+        node_info = "Invalid node structure."
 
     prompt_template = """
-    You are a Kubernetes expert. Below are the details of the namespaces and pods in a Kubernetes cluster.
+    You are a Kubernetes expert. Below are the details of the nodes, namespaces, and pods in a Kubernetes cluster.
     Use the information provided to answer the query accurately. Remember to return only the answer without any unique identifiers.
+    Thi
+
+    Node Status:
+    {node_info}
 
     Namespace and Pod Details:
     {namespace_info}
@@ -124,7 +133,7 @@ def get_agent_response(cluster_details, query):
     Answer:
     """
 
-    formatted_prompt = prompt_template.format(namespace_info=namespace_info, query=query)
+    formatted_prompt = prompt_template.format(node_info=node_info, namespace_info=namespace_info, query=query)
 
     openai_llm = OpenAI(temperature=0.3, openai_api_key=openai_key_api)
 
@@ -134,9 +143,8 @@ def get_agent_response(cluster_details, query):
 
     llm_response = llm_chain.run({})
 
-    simplified_response = " ".join([word.split('-')[0] for word in llm_response.split()])
-    return simplified_response
-
+    llm_response = " ".join([word.split('-')[0] for word in llm_response.split()])
+    return llm_response
 
 
 @app.route('/query', methods=['POST'])
