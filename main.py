@@ -1,4 +1,5 @@
 import logging
+import re
 from flask import Flask, request, jsonify
 from pydantic import BaseModel, ValidationError
 from kubernetes import client, config
@@ -133,7 +134,7 @@ def get_agent_response(cluster_details, query):
     {namespace_info}
 
     Query: {query}
-    Answer:
+    Answer without any explainations or identifiers or other prefix/suffixes.
     """
 
     formatted_prompt = prompt_template.format(node_info=node_info, namespace_info=namespace_info, query=query)
@@ -146,8 +147,10 @@ def get_agent_response(cluster_details, query):
 
     llm_response = llm_chain.run({})
 
-    llm_response = " ".join([word.split('-')[0] for word in llm_response.split()])
-    return llm_response
+    # Use regex to remove unwanted characters and clean up the response
+    clean_response = re.sub(r'[^A-Za-z0-9\s]', '', llm_response).strip()
+
+    return clean_response
 
 
 @app.route('/query', methods=['POST'])
