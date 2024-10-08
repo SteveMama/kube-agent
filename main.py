@@ -22,17 +22,14 @@ class QueryResponse(BaseModel):
 def get_all_cluster_info():
     """
     Function to return a JSON with detailed information including nodes, namespaces,
-    their pods, pod status, logs, and resource information. If a permission issue
-    is encountered for a namespace or resource, the function will exclude it and
-    set the value to `None`.
+    their pods, pod status, services, logs, and resource information.
     """
     try:
         config.load_kube_config()
-
         clientv1 = client.CoreV1Api()
-
         node_details = {}
 
+        # Fetch Nodes and their Status
         try:
             nodes = clientv1.list_node()
             for node in nodes.items:
@@ -43,6 +40,8 @@ def get_all_cluster_info():
             if e.status == 403:
                 logging.warning(f"Permission denied when accessing nodes. Error: {e}")
                 node_details = None
+
+        # Fetch Pods
         try:
             all_pods = clientv1.list_pod_for_all_namespaces()
         except client.exceptions.ApiException as e:
@@ -58,12 +57,12 @@ def get_all_cluster_info():
 
             if not node_name:
                 continue
+
             try:
                 pod_logs = clientv1.read_namespaced_pod_log(name=pod_name, namespace=namespace)
             except client.exceptions.ApiException as e:
                 if e.status == 403:
-                    logging.warning(
-                        f"Permission denied when accessing logs for pod {pod_name} in namespace {namespace}.")
+                    logging.warning(f"Permission denied when accessing logs for pod {pod_name} in namespace {namespace}.")
                     pod_logs = None
 
             resource_info = []
@@ -87,6 +86,30 @@ def get_all_cluster_info():
                     "logs": pod_logs,
                     "resources": resource_info
                 })
+
+        # Fetch Services
+        services_details = {}
+        try:
+            services = clientv1.list_service_for_all_namespaces()
+            for service in services.items:
+                service_name = service.metadata.name
+                namespace = service.metadata.namespace
+                cluster_ip = service.spec.cluster_ip
+
+                if namespace not in services_details:
+                    services_details[namespace] = []
+
+                services_details[namespace].append({
+                    "service_name": service_name,
+                    "cluster_ip": cluster_ip
+                })
+
+            node_details['services'] = services_details
+
+        except client.exceptions.ApiException as e:
+            if e.status == 403:
+                logging.warning(f"Permission denied when accessing services. Error: {e}")
+                node_details['services'] = None
 
         return node_details
 
@@ -114,30 +137,43 @@ def get_agent_response(cluster_details, query):
             if isinstance(details, list)
         ])
 
+        service_info = "\n".join([
+            f"Namespace: {namespace}\nServices: {', '.join(['{0} (IP: {1})'.format(service['service_name'], service['cluster_ip']) for service in services])}"
+            for namespace, services in cluster_details.get("services", {}).items()
+        ])
+
+
+
+
     except KeyError as e:
         logging.error(f"KeyError encountered in processing: {e}")
         namespace_info = "Invalid cluster structure."
         node_info = "Invalid node structure."
 
     prompt_template = """
-    You are a Kubernetes expert. Below are the details of the nodes, namespaces, and pods in a Kubernetes cluster.
-    Use the information provided to answer the query accurately. Remember to return only the answer without any unique identifiers. you must return the answer without any explainations as well.
-    Follow the format provided in the sample question and answers while returning the answer. 
+    You are a Kubernetes expert. Below are the details of the nodes, namespaces, pods, and services in a Kubernetes cluster. You will answer queries related to the kubernetes details provided. 
+    You are prohibited from answering any questions or queries about anything else apart from the information provided below.
+    Use the information provided to answer the query accurately. Remember to return only the answer without any unique identifiers.
+    You must use return the answer in a single word without any unique identifiers or explainations with it. Here are examples to follow the format of answering. 
+    These examples are completely fictional and do not reflect the actual status of the cluster:
     Q: "Which pod is spawned by my-deployment?" A: "my-pod"
     Q: "What is the status of the pod named 'example-pod'?" A: "Running"
-    Q: "How many nodes are there in the cluster?" A: "2"
-
+    
+    
     Node Status:
     {node_info}
 
     Namespace and Pod Details:
     {namespace_info}
 
+    Service Details:
+    {service_info}
+
     Query: {query}
-    Answer without any explainations or identifiers or other prefix/suffixes.
+    Answer:
     """
 
-    formatted_prompt = prompt_template.format(node_info=node_info, namespace_info=namespace_info, query=query)
+    formatted_prompt = prompt_template.format(node_info=node_info, namespace_info=namespace_info, service_info=service_info, query=query)
 
     openai_llm = OpenAI(temperature=0.3, openai_api_key=openai_key_api)
 
@@ -147,8 +183,8 @@ def get_agent_response(cluster_details, query):
 
     llm_response = llm_chain.run({})
 
-    # Use regex to remove unwanted characters and clean up the response
-    clean_response = re.sub(r'[^A-Za-z0-9\s]', '', llm_response).strip()
+    # Use regex to preserve essential characters and remove unwanted ones
+    clean_response = re.sub(r'[^A-Za-z0-9\s\.\:\-/]', '', llm_response).strip()
 
     return clean_response
 
@@ -162,7 +198,7 @@ def create_query():
         logging.info(f"Received query: {query}")
 
         cluster_details = get_all_cluster_info()
-
+        print(cluster_details)
         answer = get_agent_response(cluster_details, query)
 
         logging.info(f"Generated answer: {answer}")
