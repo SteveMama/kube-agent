@@ -2,6 +2,7 @@ import logging
 import re
 from flask import Flask, request, jsonify
 from pydantic import BaseModel, ValidationError
+from kubernetes.client import CustomObjectsApi, ApiextensionsV1Api
 from kubernetes import client, config
 from langchain import OpenAI, LLMChain, PromptTemplate
 
@@ -19,174 +20,140 @@ class QueryResponse(BaseModel):
     answer: str
 
 
-def get_all_cluster_info():
+def get_cluster_info():
+    config.load_kube_config()
+    version_info = client.VersionApi().get_code()
+    clientv1 = client.CoreV1Api()
+    return {
+        "kubernetes_version": version_info.git_version,
+        "api_server_endpoint": config.kube_config.KUBE_CONFIG_DEFAULT_LOCATION,
+        "number_of_nodes": len(clientv1.list_node().items),
+    }
+
+
+def get_node_info():
+    config.load_kube_config()
+    clientv1 = client.CoreV1Api()
+    nodes_info = {}
+    nodes = clientv1.list_node()
+    for node in nodes.items:
+        node_name = node.metadata.name
+        node_ip = node.status.addresses[0].address if node.status.addresses else "N/A"
+        node_capacity = {k: v for k, v in node.status.capacity.items()}
+        node_conditions = {condition.type: condition.status for condition in node.status.conditions}
+        node_labels = node.metadata.labels
+        nodes_info[node_name] = {
+            "node_ip": node_ip,
+            "node_capacity": node_capacity,
+            "node_conditions": node_conditions,
+            "node_labels": node_labels
+        }
+    return nodes_info
+
+
+def get_namespace_info():
+    config.load_kube_config()
+    clientv1 = client.CoreV1Api()
+    namespaces = clientv1.list_namespace()
+    namespace_details = {}
+    for ns in namespaces.items:
+        name = ns.metadata.name
+        quota = clientv1.list_namespaced_resource_quota(namespace=name)
+        limits = clientv1.list_namespaced_limit_range(namespace=name)
+        namespace_details[name] = {
+            "resource_quotas": quota.items,
+            "limits": limits.items,
+        }
+    return namespace_details
+
+
+def get_workload_info():
+    config.load_kube_config()
+    apps_v1 = client.AppsV1Api()
+    batch_v1 = client.BatchV1Api()
+    workloads = {
+        "deployments": apps_v1.list_deployment_for_all_namespaces().items,
+        "statefulsets": apps_v1.list_stateful_set_for_all_namespaces().items,
+        "daemonsets": apps_v1.list_daemon_set_for_all_namespaces().items,
+        "jobs": batch_v1.list_job_for_all_namespaces().items,
+        "cronjobs": batch_v1.list_cron_job_for_all_namespaces().items,
+    }
+    return workloads
+
+
+def get_service_info():
+    config.load_kube_config()
+    clientv1 = client.CoreV1Api()
+    services = clientv1.list_service_for_all_namespaces()
+    service_details = {}
+    for service in services.items:
+        name = service.metadata.name
+        namespace = service.metadata.namespace
+        service_type = service.spec.type
+        cluster_ip = service.spec.cluster_ip
+        if namespace not in service_details:
+            service_details[namespace] = []
+        service_details[namespace].append({
+            "service_name": name,
+            "service_type": service_type,
+            "cluster_ip": cluster_ip
+        })
+    return service_details
+
+
+def aggregate_info():
     """
-    Function to return a JSON with detailed information including nodes, namespaces,
-    their pods, pod status, services, logs, and resource information.
+    Collect information from all the different functions and return a combined single string.
     """
-    try:
-        config.load_kube_config()
-        clientv1 = client.CoreV1Api()
-        node_details = {}
 
-        # Fetch Nodes and their Status
-        try:
-            nodes = clientv1.list_node()
-            for node in nodes.items:
-                node_name = node.metadata.name
-                node_status = {condition.type: condition.status for condition in node.status.conditions}
-                node_details[node_name] = {"namespaces": {}, "node_status": node_status}
-        except client.exceptions.ApiException as e:
-            if e.status == 403:
-                logging.warning(f"Permission denied when accessing nodes. Error: {e}")
-                node_details = None
+    cluster_info = get_cluster_info() or {"kubernetes_version": "N/A", "api_server_endpoint": "N/A",
+                                          "number_of_nodes": "N/A"}
+    node_info = get_node_info() or {}
+    namespace_info = get_namespace_info() or {}
+    #workload_info = get_workload_info() or {}
+    service_info = get_service_info() or {}
+    # storage_info = get_storage_info() or {}
+    # rbac_info = get_rbac_info() or {}
+    # config_secrets_info = get_config_secrets_info() or {}
+    # custom_resource_info = get_custom_resource_info() or {}
 
-        # Fetch Pods
-        try:
-            all_pods = clientv1.list_pod_for_all_namespaces()
-        except client.exceptions.ApiException as e:
-            if e.status == 403:
-                logging.warning(f"Permission denied when accessing pods. Error: {e}")
-                return {"nodes": node_details, "pods": None}
+    combined_info = f"""
+    Cluster Information:
+    - Kubernetes Version: {cluster_info.get('kubernetes_version')}
+    - API Server Endpoint: {cluster_info.get('api_server_endpoint')}
+    - Number of Nodes: {cluster_info.get('number_of_nodes')}
 
-        for pod in all_pods.items:
-            pod_name = pod.metadata.name
-            pod_status = pod.status.phase
-            namespace = pod.metadata.namespace
-            node_name = pod.spec.node_name
-
-            if not node_name:
-                continue
-
-            try:
-                pod_logs = clientv1.read_namespaced_pod_log(name=pod_name, namespace=namespace)
-            except client.exceptions.ApiException as e:
-                if e.status == 403:
-                    logging.warning(f"Permission denied when accessing logs for pod {pod_name} in namespace {namespace}.")
-                    pod_logs = None
-
-            resource_info = []
-            for container in pod.spec.containers:
-                resources = container.resources
-                requests = resources.requests if resources.requests else {}
-                limits = resources.limits if resources.limits else {}
-                resource_info.append({
-                    "container_name": container.name,
-                    "requests": requests,
-                    "limits": limits
-                })
-
-            if node_name in node_details:
-                if namespace not in node_details[node_name]["namespaces"]:
-                    node_details[node_name]["namespaces"][namespace] = []
-
-                node_details[node_name]["namespaces"][namespace].append({
-                    "pod_name": pod_name,
-                    "status": pod_status,
-                    "logs": pod_logs,
-                    "resources": resource_info
-                })
-
-        # Fetch Services
-        services_details = {}
-        try:
-            services = clientv1.list_service_for_all_namespaces()
-            for service in services.items:
-                service_name = service.metadata.name
-                namespace = service.metadata.namespace
-                cluster_ip = service.spec.cluster_ip
-
-                if namespace not in services_details:
-                    services_details[namespace] = []
-
-                services_details[namespace].append({
-                    "service_name": service_name,
-                    "cluster_ip": cluster_ip
-                })
-
-            node_details['services'] = services_details
-
-        except client.exceptions.ApiException as e:
-            if e.status == 403:
-                logging.warning(f"Permission denied when accessing services. Error: {e}")
-                node_details['services'] = None
-
-        return node_details
-
-    except Exception as e:
-        logging.error(f"Error retrieving detailed cluster information: {e}")
-        return {"error": str(e)}
-
-
-def get_agent_response(cluster_details, query):
-    """
-    Function to generate a response using LangChain and OpenAI.
-    """
-    try:
-        node_info = "\n".join([
-            f"Node: {node}\nStatus: {', '.join([f'{k}: {v}' for k, v in node_data['node_status'].items()])}"
-            for node, node_data in cluster_details.items()
-            if isinstance(node_data, dict) and "node_status" in node_data
-        ])
-
-        namespace_info = "\n".join([
-            f"Namespace: {namespace}\nPods: {', '.join([pod['pod_name'].split('-')[0] for pod in details])}\nStatus: {', '.join([pod['status'] for pod in details])}"
-            for node, namespaces in cluster_details.items()
-            if isinstance(namespaces, dict) and "namespaces" in namespaces
-            for namespace, details in namespaces["namespaces"].items()
-            if isinstance(details, list)
-        ])
-
-        service_info = "\n".join([
-            f"Namespace: {namespace}\nServices: {', '.join(['{0} (IP: {1})'.format(service['service_name'], service['cluster_ip']) for service in services])}"
-            for namespace, services in cluster_details.get("services", {}).items()
-        ])
-
-
-
-
-    except KeyError as e:
-        logging.error(f"KeyError encountered in processing: {e}")
-        namespace_info = "Invalid cluster structure."
-        node_info = "Invalid node structure."
-
-    prompt_template = """
-    You are a Kubernetes expert. Below are the details of the nodes, namespaces, pods, and services in a Kubernetes cluster. You will answer queries related to the kubernetes details provided. 
-    You are prohibited from answering any questions or queries about anything else apart from the information provided below.
-    Use the information provided to answer the query accurately. Remember to return only the answer without any unique identifiers.
-    You must use return the answer in a single word without any unique identifiers or explainations with it. Here are examples to follow the format of answering. 
-    These examples are completely fictional and do not reflect the actual status of the cluster:
-    Q: "Which pod is spawned by my-deployment?" A: "my-pod"
-    Q: "What is the status of the pod named 'example-pod'?" A: "Running"
-    
-    
-    Node Status:
+    Node Information:
     {node_info}
 
-    Namespace and Pod Details:
+    Namespace Information:
     {namespace_info}
 
-    Service Details:
+
+    Service Information:
     {service_info}
 
-    Query: {query}
-    Answer:
     """
+    return combined_info
 
-    formatted_prompt = prompt_template.format(node_info=node_info, namespace_info=namespace_info, service_info=service_info, query=query)
+
+def get_agent_response(query):
+    combined_info = aggregate_info()
+
+    print("---combined info-----", combined_info)
+    prompt_template = f"""
+        You are a Kubernetes expert. Here is the detailed cluster information:
+        {combined_info}
+
+        Query: {query}
+        Answer:
+    """
 
     openai_llm = OpenAI(temperature=0.3, openai_api_key=openai_key_api)
 
-    prompt = PromptTemplate(template=formatted_prompt, input_variables=[])
+    llm_response = openai_llm(prompt_template)
 
-    llm_chain = LLMChain(prompt=prompt, llm=openai_llm)
-
-    llm_response = llm_chain.run({})
-
-    # Use regex to preserve essential characters and remove unwanted ones
-    clean_response = re.sub(r'[^A-Za-z0-9\s\.\:\-/]', '', llm_response).strip()
-
-    return clean_response
+    return llm_response.strip()
 
 
 @app.route('/query', methods=['POST'])
@@ -197,14 +164,10 @@ def create_query():
 
         logging.info(f"Received query: {query}")
 
-        cluster_details = get_all_cluster_info()
-        print(cluster_details)
-        answer = get_agent_response(cluster_details, query)
-
+        answer = get_agent_response(query)
         logging.info(f"Generated answer: {answer}")
 
         response = QueryResponse(query=query, answer=answer)
-
         return jsonify(response.dict())
 
     except ValidationError as e:
