@@ -1,10 +1,10 @@
 import logging
-import re
+import re, os
 from flask import Flask, request, jsonify
 from pydantic import BaseModel, ValidationError
 from kubernetes.client import CustomObjectsApi, ApiextensionsV1Api
 from kubernetes import client, config
-from langchain import OpenAI, LLMChain, PromptTemplate
+from langchain import OpenAI
 
 logging.basicConfig(level=logging.DEBUG,
                     format='%(asctime)s %(levelname)s - %(message)s',
@@ -20,8 +20,29 @@ class QueryResponse(BaseModel):
     answer: str
 
 
+def get_kubeconfig_path():
+    """
+    Determines the location of the kubeconfig file.
+    Checks if the kubeconfig file exists at the default path and logs its location.
+    """
+    kubeconfig_path = os.path.expanduser("~/.kube/config")
+
+    if os.path.exists(kubeconfig_path):
+        logging.info(f"Kubeconfig found at: {kubeconfig_path}")
+    else:
+        logging.warning(f"Kubeconfig file not found at: {kubeconfig_path}")
+
+    return kubeconfig_path
+
+
+def load_kube_config():
+    """Load kubeconfig using the dynamically determined path."""
+    config_path = get_kubeconfig_path()
+    config.load_kube_config(config_file=config_path)
+
+
 def get_cluster_info():
-    config.load_kube_config()
+    load_kube_config()
     version_info = client.VersionApi().get_code()
     clientv1 = client.CoreV1Api()
     return {
@@ -32,7 +53,7 @@ def get_cluster_info():
 
 
 def get_node_info():
-    config.load_kube_config()
+    load_kube_config()
     clientv1 = client.CoreV1Api()
     nodes_info = {}
     nodes = clientv1.list_node()
@@ -44,7 +65,7 @@ def get_node_info():
         node_labels = node.metadata.labels
         nodes_info[node_name] = {
             "node_ip": node_ip,
-            "node_capacity": node_capacity,
+            "node_maximum_capacity": node_capacity,
             "node_conditions": node_conditions,
             "node_labels": node_labels
         }
@@ -52,7 +73,7 @@ def get_node_info():
 
 
 def get_namespace_info():
-    config.load_kube_config()
+    load_kube_config()
     clientv1 = client.CoreV1Api()
     namespaces = clientv1.list_namespace()
     namespace_details = {}
@@ -68,7 +89,7 @@ def get_namespace_info():
 
 
 def get_workload_info():
-    config.load_kube_config()
+    load_kube_config()
     apps_v1 = client.AppsV1Api()
     batch_v1 = client.BatchV1Api()
     workloads = {
@@ -82,7 +103,7 @@ def get_workload_info():
 
 
 def get_service_info():
-    config.load_kube_config()
+    load_kube_config()
     clientv1 = client.CoreV1Api()
     services = clientv1.list_service_for_all_namespaces()
     service_details = {}
@@ -101,58 +122,181 @@ def get_service_info():
     return service_details
 
 
+def get_pod_info():
+    load_kube_config()
+    clientv1 = client.CoreV1Api()
+    pods = clientv1.list_pod_for_all_namespaces()
+    pod_details = {}
+
+    for pod in pods.items:
+        namespace = pod.metadata.namespace
+        pod_name = pod.metadata.name
+        qos_class = pod.status.qos_class
+        restart_policy = pod.spec.restart_policy
+        init_containers = len(pod.spec.init_containers) if pod.spec.init_containers else 0
+
+        env_vars = []
+        volume_mounts = []
+
+        for container in pod.spec.containers:
+            if container.env:
+                env_vars.extend([{env_var.name: env_var.value} for env_var in container.env])
+            if container.volume_mounts:
+                volume_mounts.extend([{
+                    "container_name": container.name,
+                    "mount_path": mount.mount_path
+                } for mount in container.volume_mounts])
+
+        if namespace not in pod_details:
+            pod_details[namespace] = []
+
+        pod_details[namespace].append({
+            "pod_name": pod_name,
+            "qos_class": qos_class,
+            "restart_policy": restart_policy,
+            "init_containers": init_containers,
+            "env_vars": env_vars,
+            "volume_mounts": volume_mounts
+        })
+
+    return pod_details
+
+
+def get_container_info(pod_info):
+    load_kube_config()
+    container_details = {}
+    for namespace, pods in pod_info.items():
+        for pod in pods:
+            pod_name = pod["pod_name"]
+            containers = client.CoreV1Api().read_namespaced_pod(name=pod_name, namespace=namespace).spec.containers
+            container_details[pod_name] = [{
+                "container_name": container.name,
+                "image": container.image,
+                "ports": [port.container_port for port in container.ports] if container.ports else []
+            } for container in containers]
+
+    return container_details
+
+
+def get_pod_env_vars():
+    load_kube_config()
+    clientv1 = client.CoreV1Api()
+    pods = clientv1.list_pod_for_all_namespaces()
+    env_details = {}
+
+    for pod in pods.items:
+        namespace = pod.metadata.namespace
+        pod_name = pod.metadata.name
+
+        if namespace not in env_details:
+            env_details[namespace] = []
+
+        env_vars = {}
+        for container in pod.spec.containers:
+            if container.env:
+                for env_var in container.env:
+                    env_vars[env_var.name] = env_var.value
+
+        env_details[namespace].append({
+            "pod_name": pod_name,
+            "env_vars": env_vars
+        })
+
+    return env_details
+
+
 def aggregate_info():
-    """
-    Collect information from all the different functions and return a combined single string.
-    """
+    cluster_info = get_cluster_info()
+    node_info = get_node_info()
+    namespace_info = get_namespace_info()
+    workload_info = get_workload_info()
+    service_info = get_service_info()
+    pod_info = get_pod_info()
+    container_info = get_container_info(pod_info)
+    env_info = get_pod_env_vars()
 
-    cluster_info = get_cluster_info() or {"kubernetes_version": "N/A", "api_server_endpoint": "N/A",
-                                          "number_of_nodes": "N/A"}
-    node_info = get_node_info() or {}
-    namespace_info = get_namespace_info() or {}
-    #workload_info = get_workload_info() or {}
-    service_info = get_service_info() or {}
-    # storage_info = get_storage_info() or {}
-    # rbac_info = get_rbac_info() or {}
-    # config_secrets_info = get_config_secrets_info() or {}
-    # custom_resource_info = get_custom_resource_info() or {}
+    combined_info = {
+        "Cluster Information": cluster_info,
+        "Node Information": node_info,
+        "Namespace Information": namespace_info,
+        "Workload Information": workload_info,
+        "Service Information": service_info,
+        "Pod Information": pod_info,
+        "Container Information": container_info,
+        "Environment Variables": env_info
+    }
 
-    combined_info = f"""
+    return combined_info
+
+
+def generate_prompt(combined_info, query):
+    cluster_info = combined_info.get("Cluster Information", {})
+    node_info = combined_info.get("Node Information", {})
+    namespace_info = combined_info.get("Namespace Information", {})
+    workload_info = combined_info.get("Workload Information", {})
+    service_info = combined_info.get("Service Information", {})
+    pod_info = combined_info.get("Pod Information", {})
+    container_info = combined_info.get("Container Information", {})
+    hpa_info = combined_info.get("HPA Information", "N/A")
+    storage_driver = combined_info.get("Storage Driver", "N/A")
+    scheduler_info = combined_info.get("Scheduler Information", "N/A")
+
+    node_info_str = "\n".join([f"- {node}: {details}" for node, details in node_info.items()])
+    namespace_info_str = "\n".join([f"- {namespace}: {details}" for namespace, details in namespace_info.items()])
+    workload_info_str = "\n".join([f"- {workload_type}: {len(items)} items" for workload_type, items in workload_info.items()])
+    service_info_str = "\n".join([f"- {namespace}: {services}" for namespace, services in service_info.items()])
+    pod_info_str = "\n".join([f"- {namespace}: {pods}" for namespace, pods in pod_info.items()])
+    container_info_str = "\n".join([f"- {pod}: {containers}" for pod, containers in container_info.items()])
+
+    prompt_template = f"""
+    You are a Kubernetes expert. Here is the detailed cluster information:
+
     Cluster Information:
     - Kubernetes Version: {cluster_info.get('kubernetes_version')}
     - API Server Endpoint: {cluster_info.get('api_server_endpoint')}
     - Number of Nodes: {cluster_info.get('number_of_nodes')}
 
     Node Information:
-    {node_info}
+    {node_info_str}
 
     Namespace Information:
-    {namespace_info}
+    {namespace_info_str}
 
+    Workload Information:
+    {workload_info_str}
 
     Service Information:
-    {service_info}
+    {service_info_str}
 
+    Pod Information:
+    {pod_info_str}
+
+    Container Information:
+    {container_info_str}
+
+    HPA Information:
+    {hpa_info}
+
+    Storage Driver:
+    {storage_driver}
+
+    Scheduler Information:
+    {scheduler_info}
+
+    Query: {query}
+    Answer:
     """
-    return combined_info
+
+    return prompt_template
 
 
 def get_agent_response(query):
     combined_info = aggregate_info()
-
-    print("---combined info-----", combined_info)
-    prompt_template = f"""
-        You are a Kubernetes expert. Here is the detailed cluster information:
-        {combined_info}
-
-        Query: {query}
-        Answer:
-    """
+    formatted_prompt = generate_prompt(combined_info, query)
+    logging.info(f"Formatted Prompt: {formatted_prompt}")
 
     openai_llm = OpenAI(temperature=0.3, openai_api_key=openai_key_api)
-
-    llm_response = openai_llm(prompt_template)
-
+    llm_response = openai_llm(formatted_prompt)
     return llm_response.strip()
 
 
@@ -161,7 +305,6 @@ def create_query():
     try:
         request_data = request.json
         query = request_data.get('query')
-
         logging.info(f"Received query: {query}")
 
         answer = get_agent_response(query)
