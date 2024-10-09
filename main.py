@@ -2,7 +2,6 @@ import logging
 import re, os
 from flask import Flask, request, jsonify
 from pydantic import BaseModel, ValidationError
-from kubernetes.client import CustomObjectsApi, ApiextensionsV1Api
 from kubernetes import client, config
 from langchain import OpenAI
 
@@ -12,7 +11,7 @@ logging.basicConfig(level=logging.DEBUG,
 
 app = Flask(__name__)
 
-openai_key_api = ''
+openai_key_api = os.environ.get('OPENAI_API_KEY')
 
 
 class QueryResponse(BaseModel):
@@ -230,6 +229,11 @@ def aggregate_info():
 
 
 def generate_prompt(combined_info, query):
+    """
+    Generates a concise prompt for querying Kubernetes cluster information.
+    Returns a concise answer without identifiers or justifications.
+    """
+    # Extract necessary details from the combined cluster information
     cluster_info = combined_info.get("Cluster Information", {})
     node_info = combined_info.get("Node Information", {})
     namespace_info = combined_info.get("Namespace Information", {})
@@ -237,54 +241,41 @@ def generate_prompt(combined_info, query):
     service_info = combined_info.get("Service Information", {})
     pod_info = combined_info.get("Pod Information", {})
     container_info = combined_info.get("Container Information", {})
-    hpa_info = combined_info.get("HPA Information", "N/A")
-    storage_driver = combined_info.get("Storage Driver", "N/A")
-    scheduler_info = combined_info.get("Scheduler Information", "N/A")
 
-    node_info_str = "\n".join([f"- {node}: {details}" for node, details in node_info.items()])
-    namespace_info_str = "\n".join([f"- {namespace}: {details}" for namespace, details in namespace_info.items()])
-    workload_info_str = "\n".join([f"- {workload_type}: {len(items)} items" for workload_type, items in workload_info.items()])
-    service_info_str = "\n".join([f"- {namespace}: {services}" for namespace, services in service_info.items()])
-    pod_info_str = "\n".join([f"- {namespace}: {pods}" for namespace, pods in pod_info.items()])
-    container_info_str = "\n".join([f"- {pod}: {containers}" for pod, containers in container_info.items()])
+    node_info_str = "\n".join([f"- {node}" for node in node_info.keys()])
+    namespace_info_str = "\n".join([f"- {namespace}" for namespace in namespace_info.keys()])
+    workload_info_str = "\n".join(
+        [f"- {workload_type}: {len(items)} items" for workload_type, items in workload_info.items()])
+    service_info_str = "\n".join(
+        [f"- {namespace}: {', '.join([svc['service_name'] for svc in services])}" for namespace, services in
+         service_info.items()])
+    pod_info_str = "\n".join(
+        [f"- {namespace}: {', '.join([pod['pod_name'] for pod in pods])}" for namespace, pods in pod_info.items()])
+    container_info_str = "\n".join(
+        [f"- {pod}: {', '.join([container['container_name'] for container in containers])}" for pod, containers in
+         container_info.items()])
 
     prompt_template = f"""
-    You are a Kubernetes expert. Here is the detailed cluster information:
-
-    Cluster Information:
+    You are a Kubernetes assistant. The user asked: '{query}'. You must answer the query based on the information without any explainations.
+    Here are a few fictional examples  to help you with the format of the answer:
+    Q: "Which pod is spawned by my-deployment?" Answer: "my-pod"
+    Q: "What is the status of the pod named 'example-pod'?" Answer: "Running"
+    Q: "How many nodes are there in the cluster?" Answer: "2"
+     
+     Here is the cluster information:
     - Kubernetes Version: {cluster_info.get('kubernetes_version')}
-    - API Server Endpoint: {cluster_info.get('api_server_endpoint')}
     - Number of Nodes: {cluster_info.get('number_of_nodes')}
+    - Nodes: {node_info_str}
+    - Namespaces: {namespace_info_str}
+    - Workloads: {workload_info_str}
+    - Services: {service_info_str}
+    - Pods: {pod_info_str}
+    - Containers: {container_info_str}
 
-    Node Information:
-    {node_info_str}
-
-    Namespace Information:
-    {namespace_info_str}
-
-    Workload Information:
-    {workload_info_str}
-
-    Service Information:
-    {service_info_str}
-
-    Pod Information:
-    {pod_info_str}
-
-    Container Information:
-    {container_info_str}
-
-    HPA Information:
-    {hpa_info}
-
-    Storage Driver:
-    {storage_driver}
-
-    Scheduler Information:
-    {scheduler_info}
-
-    Query: {query}
-    Answer:
+    Answer the query in just one word. Provide only the necessary information without any technical identifiers, suffixes, or justifications. Return only the answer.
+    
+    Query:
+    Answer: only the answer. NO IDENTIFIERS
     """
 
     return prompt_template
