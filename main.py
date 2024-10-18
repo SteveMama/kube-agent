@@ -51,7 +51,7 @@ import logging
 import os
 from flask import Flask, request, jsonify
 from pydantic import BaseModel, ValidationError
-import openai  # Add this import
+import openai 
 from utils import (
     aggregate_info,
     get_agent_response
