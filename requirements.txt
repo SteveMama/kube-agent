@@ -2,4 +2,4 @@ requests
 Flask
 pydantic
 kubernetes
-langchain==0.2.12
+openai==0.28
