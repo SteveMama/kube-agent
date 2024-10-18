@@ -223,7 +223,7 @@ def get_agent_response(query):
 
     try:
         response = openai.ChatCompletion.create(
-            model="gpt-4o",  # or "gpt-4" if you have access
+            model="gpt-4o-mini",  
             messages=[
                 {"role": "system", "content": "You are a Kubernetes assistant. Answer the query based on the given information without any explanations."},
                 {"role": "user", "content": formatted_prompt}
