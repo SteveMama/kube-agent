@@ -2,7 +2,7 @@ import logging
 import os
 from kubernetes import client, config
 from prompt import generate_prompt
-import openai  # Add this import
+import openai 
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -223,7 +223,7 @@ def get_agent_response(query):
 
     try:
         response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",  
+            model="gpt-4o",  
             messages=[
                 {"role": "system", "content": "You are a Kubernetes assistant. Answer the query based on the given information without any explanations."},
                 {"role": "user", "content": formatted_prompt}
