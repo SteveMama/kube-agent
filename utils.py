@@ -2,7 +2,7 @@ import logging
 import os
 from kubernetes import client, config
 from prompt import generate_prompt
-from langchain import OpenAI
+import openai  # Add this import
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -216,11 +216,21 @@ def aggregate_info():
     return combined_info
 
 
-def get_agent_response(query, openai_key_api):
+def get_agent_response(query):
     combined_info = aggregate_info()
     formatted_prompt = generate_prompt(combined_info, query)
     logging.info(f"Formatted Prompt: {formatted_prompt}")
 
-    openai_llm = OpenAI(temperature=0.3, openai_api_key=openai_key_api)
-    llm_response = openai_llm(formatted_prompt)
-    return llm_response.strip()
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4o",  # or "gpt-4" if you have access
+            messages=[
+                {"role": "system", "content": "You are a Kubernetes assistant. Answer the query based on the given information without any explanations."},
+                {"role": "user", "content": formatted_prompt}
+            ],
+            temperature=0.3
+        )
+        return response.choices[0].message['content'].strip()
+    except Exception as e:
+        logging.error(f"Error in OpenAI API call: {str(e)}")
+        return "Sorry, I encountered an error while processing your request."
