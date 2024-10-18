@@ -19,7 +19,6 @@ minikube start
 - `Flask`
 - `pydantic`
 - `kubernetes`
-- `langchain`
 - `OpenAI`
 - `os`, `logging`, `re` (Python built-in libraries)
    
