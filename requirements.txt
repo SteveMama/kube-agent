@@ -1,4 +1,5 @@
 requests
 Flask
 pydantic
+kubernetes
 langchain==0.2.12
